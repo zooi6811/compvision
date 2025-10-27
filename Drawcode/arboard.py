@@ -1,5 +1,7 @@
 import cv2
 import numpy as np
+import math  # --- NEW ---
+import os
 
 class ARDrawingBoard:
     def __init__(self, num_boards=3, camera_index=0):
@@ -12,6 +14,29 @@ class ARDrawingBoard:
         self.ALPHA = 0.6
         self.MOVE_ALPHA = 0.5
         self.PREVIEW_SIZE = 100
+
+        # --- Shape Detection Setup ---
+        self.shape_images = {}
+        # We will load all 4 shape images
+        SHAPE_NAMES = ["heart", "square", "triangle", "house"]
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        for shape_name in SHAPE_NAMES:
+            try:
+                # Look for the PNGs in the *same directory* as this script
+                img_path = os.path.join(script_dir, f"{shape_name}.png") 
+                img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    raise FileNotFoundError(f"File not found: {img_path}")
+                
+                # We just load the image, no Hu Moments calculation
+                self.shape_images[shape_name] = img
+                print(f"Loaded replacement image: {shape_name}")
+                    
+            except Exception as e:
+                print(f"ERROR: Could not load replacement image '{shape_name}'. {e}")
+                print("       Make sure PNG files are in the 'Drawcode' directory.")
 
         # --- State ---
         self.boards = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(self.NUM_BOARDS)]
@@ -118,11 +143,11 @@ class ARDrawingBoard:
     def _handle_draw_erase_from_event(self, event, board):
         x, y = event["x"], event["y"]
         t = event["type"]
-        src = event["source"] # <-- CHANGE 2: Get the source
+        src = event["source"] 
 
         if t == "down":
             self.drawing = True
-            self.drawing_source = src # <-- Record the source
+            self.drawing_source = src 
             self.last_point = (x, y)
         elif t == "move" and self.drawing:
             # --- Only draw if the event source is the one that started it ---
@@ -135,9 +160,17 @@ class ARDrawingBoard:
         elif t == "up":
             # --- Only lift the pen if the source matches ---
             if src == self.drawing_source:
+                # --- CAPTURE CURRENT MODE ---
+                mode_when_drawing_started = self.mode 
+                
                 self.drawing = False
-                self.drawing_source = None # <-- Clear the source
+                self.drawing_source = None 
                 self.last_point = None
+                
+                # --- Check for shapes ---
+                # Only check if we were in 'draw' mode (not 'erase' mode)
+                if mode_when_drawing_started == 'draw':
+                    self._check_for_shapes(board)
 
     # ============================================================
     #  COPY SELECTION (UNIFIED)
@@ -145,7 +178,7 @@ class ARDrawingBoard:
     def _handle_copy_selection_from_event(self, event):
         x, y = event["x"], event["y"]
         t = event["type"]
-        src = event["source"] # <-- CHANGE 3: Apply same logic here
+        src = event["source"] 
 
         if t == "down":
             self.drawing = True
@@ -153,11 +186,11 @@ class ARDrawingBoard:
             self.selection_points = [(x, y)]
             self.last_point = (x, y)
         elif t == "move" and self.drawing:
-            if src == self.drawing_source: # <-- Check source
+            if src == self.drawing_source: 
                 self.selection_points.append((x, y))
                 self.last_point = (x, y)
         elif t == "up":
-            if src == self.drawing_source: # <-- Check source
+            if src == self.drawing_source: 
                 self.drawing = False
                 self.drawing_source = None
                 self.last_point = None
@@ -214,7 +247,7 @@ class ARDrawingBoard:
     def _handle_manip_selection_from_event(self, event):
         x, y = event["x"], event["y"]
         t = event["type"]
-        src = event["source"] # <-- CHANGE 4: Apply same logic here
+        src = event["source"] 
 
         if t == "down":
             self.drawing = True
@@ -222,11 +255,11 @@ class ARDrawingBoard:
             self.manip_selection = [(x, y)]
             self.last_point = (x, y)
         elif t == "move" and self.drawing:
-            if src == self.drawing_source: # <-- Check source
+            if src == self.drawing_source: 
                 self.manip_selection.append((x, y))
                 self.last_point = (x, y)
         elif t == "up":
-            if src == self.drawing_source: # <-- Check source
+            if src == self.drawing_source: 
                 self.drawing = False
                 self.drawing_source = None
                 self.last_point = None
@@ -447,6 +480,148 @@ class ARDrawingBoard:
 
         return True
 
+
+    # ============================================================
+    #  SHAPE DETECTION 
+    # ============================================================
+
+    @staticmethod
+    def _overlay_transparent_image(background, overlay, x, y):
+        """Overlays a transparent PNG onto a background image in-place."""
+        if overlay.shape[2] < 4: return
+        h, w, _ = background.shape
+        h_overlay, w_overlay, _ = overlay.shape
+
+        x1, x2 = max(0, x), min(w, x + w_overlay)
+        y1, y2 = max(0, y), min(h, y + h_overlay)
+        
+        x1_overlay, x2_overlay = max(0, -x), min(w_overlay, w - x)
+        y1_overlay, y2_overlay = max(0, -y), min(h_overlay, h - y)
+
+        if x1 >= x2 or y1 >= y2: return
+
+        alpha = overlay[y1_overlay:y2_overlay, x1_overlay:x2_overlay, 3] / 255.0
+        alpha_inv = 1.0 - alpha
+        overlay_rgb = overlay[y1_overlay:y2_overlay, x1_overlay:x2_overlay, :3]
+        
+        for c in range(0, 3):
+            background[y1:y2, x1:x2, c] = (alpha * overlay_rgb[:, :, c] +
+                                          alpha_inv * background[y1:y2, x1:x2, c])
+
+
+    def _get_shape_name_from_contour(self, contour):
+        """
+        Analyzes a contour using heuristics (vertex count, aspect ratio) 
+        and returns a shape name (e.g., "square") or None.
+        """
+        # 1. Filter out small noise
+        if cv2.contourArea(contour) < 1500:
+            return None
+
+        # 2. Get polygon approximation
+        perimeter = cv2.arcLength(contour, True)
+        # We can tune this epsilon. 0.02 is a good start. 
+        # Increase (e.g., 0.04) to make it *less* sensitive.
+        epsilon = 0.04 * perimeter 
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        num_vertices = len(approx)
+
+        # 3. Get bounding box info
+        x, y, w, h = cv2.boundingRect(contour)
+        if h == 0: return None # Avoid divide by zero
+        aspect_ratio = float(w) / h
+
+        # 4. Shape logic
+        print(f"DEBUG: Found contour with {num_vertices} vertices, aspect ratio {aspect_ratio:.2f}")
+
+        if num_vertices == 3:
+            print("  -> Matched TRIANGLE")
+            return "triangle"
+            
+        elif num_vertices == 4:
+            # Check for square-like aspect ratio
+            if 0.8 < aspect_ratio < 1.2:
+                print("  -> Matched SQUARE")
+                return "square"
+            
+        elif num_vertices == 5:
+            # Simple heuristic for a house
+            if 0.7 < aspect_ratio < 1.3:
+                print("  -> Matched HOUSE")
+                return "house"
+                
+        elif 8 <= num_vertices <= 15:
+            # Check for heart using the more complex convexity defect method
+            if self._is_heart_shape_heuristic(contour, aspect_ratio):
+                print("  -> Matched HEART")
+                return "heart"
+
+        return None
+
+    @staticmethod
+    def _is_heart_shape_heuristic(contour, aspect_ratio):
+        """The original heuristic check for a heart shape."""
+        # Check aspect ratio
+        if not (0.7 < aspect_ratio < 1.3): 
+            return False
+            
+        try:
+            hull = cv2.convexHull(contour, returnPoints=False)
+            if len(hull) < 3: return False
+            defects = cv2.convexityDefects(contour, hull)
+            if defects is None: return False
+            # Hearts usually have a characteristic set of defects
+            # This is just a guess, but it's part of the heuristic
+            if len(defects) > 2:
+                return True 
+        except cv2.error:
+            return False
+            
+        return False
+
+
+    def _check_for_shapes(self, board):
+        """Finds contours, checks them with the poly method, and replaces them."""
+        if not self.shape_images:
+            return
+
+        print("\n--- Checking for shapes (Poly Method) ---")
+        canvas_gray = cv2.cvtColor(board, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(canvas_gray, 10, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        replacements = []
+
+        for contour in contours:
+            shape_name = self._get_shape_name_from_contour(contour)
+            
+            if shape_name and shape_name in self.shape_images:
+                replacements.append((contour, shape_name))
+        
+        # Apply all replacements
+        for contour, shape_name in replacements:
+            x, y, w_drawn, h_drawn = cv2.boundingRect(contour)
+            
+            # 1. Erase the drawn contour
+            cv2.drawContours(board, [contour], -1, self.ERASE_COLOR, cv2.FILLED)
+            
+            # 2. Get the correct replacement image
+            replacement_img = self.shape_images[shape_name]
+            
+            # 3. Resize and overlay the replacement PNG
+            padding_factor = 1.2 
+            new_w = int(w_drawn * padding_factor)
+            new_h = int(h_drawn * padding_factor)
+            
+            if new_w > 0 and new_h > 0:
+                resized_img = cv2.resize(replacement_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                overlay_x = x - (new_w - w_drawn) // 2
+                overlay_y = y - (new_h - h_drawn) // 2
+                self._overlay_transparent_image(board, resized_img, overlay_x, overlay_y)
+
+    # ============================================================
+    #  MODE MANAGEMENT
+    # ============================================================
 
     def _reset_modes(self, draw=False, erase=False, page_mode=False):
         # Clear all mode flags and selections

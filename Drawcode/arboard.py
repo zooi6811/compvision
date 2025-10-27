@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import math  # --- NEW ---
 import os
+import joblib
 
 class ARDrawingBoard:
     def __init__(self, num_boards=3, camera_index=0):
@@ -37,6 +38,17 @@ class ARDrawingBoard:
             except Exception as e:
                 print(f"ERROR: Could not load replacement image '{shape_name}'. {e}")
                 print("       Make sure PNG files are in the 'Drawcode' directory.")
+
+        # --- Load SVM Model and Scaler ---
+        try:
+            self.svm_model = joblib.load('svm_model.pkl')
+            self.scaler = joblib.load('scaler.pkl')
+            self.class_names = joblib.load('class_names.pkl')
+            print("Successfully loaded SVM model, scaler, and class names.")
+        except FileNotFoundError:
+            print("ERROR: Model files not found (svm_model.pkl, scaler.pkl, class_names.pkl).")
+            print("       Please run train_model.py first.")
+            self.svm_model = None # Set to None so we can check later
 
         # --- State ---
         self.boards = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(self.NUM_BOARDS)]
@@ -508,84 +520,24 @@ class ARDrawingBoard:
             background[y1:y2, x1:x2, c] = (alpha * overlay_rgb[:, :, c] +
                                           alpha_inv * background[y1:y2, x1:x2, c])
 
-
-    def _get_shape_name_from_contour(self, contour):
-        """
-        Analyzes a contour using heuristics (vertex count, aspect ratio) 
-        and returns a shape name (e.g., "square") or None.
-        """
-        # 1. Filter out small noise
-        if cv2.contourArea(contour) < 1500:
-            return None
-
-        # 2. Get polygon approximation
-        perimeter = cv2.arcLength(contour, True)
-        # We can tune this epsilon. 0.02 is a good start. 
-        # Increase (e.g., 0.04) to make it *less* sensitive.
-        epsilon = 0.04 * perimeter 
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-        num_vertices = len(approx)
-
-        # 3. Get bounding box info
-        x, y, w, h = cv2.boundingRect(contour)
-        if h == 0: return None # Avoid divide by zero
-        aspect_ratio = float(w) / h
-
-        # 4. Shape logic
-        print(f"DEBUG: Found contour with {num_vertices} vertices, aspect ratio {aspect_ratio:.2f}")
-
-        if num_vertices == 3:
-            print("  -> Matched TRIANGLE")
-            return "triangle"
+    def _get_features_from_contour(self, contour):
+        """Calculates log-transformed Hu Moments for a contour."""
+        moments = cv2.moments(contour)
+        hu_moments = cv2.HuMoments(moments)
+        
+        # Log-transform hu moments
+        for i in range(7):
+            hu_moments[i] = -1 * math.copysign(1.0, hu_moments[i][0]) * math.log10(abs(hu_moments[i][0]) + 1e-9)
             
-        elif num_vertices == 4:
-            # Check for square-like aspect ratio
-            if 0.8 < aspect_ratio < 1.2:
-                print("  -> Matched SQUARE")
-                return "square"
-            
-        elif num_vertices == 5:
-            # Simple heuristic for a house
-            if 0.7 < aspect_ratio < 1.3:
-                print("  -> Matched HOUSE")
-                return "house"
-                
-        elif 8 <= num_vertices <= 15:
-            # Check for heart using the more complex convexity defect method
-            if self._is_heart_shape_heuristic(contour, aspect_ratio):
-                print("  -> Matched HEART")
-                return "heart"
-
-        return None
-
-    @staticmethod
-    def _is_heart_shape_heuristic(contour, aspect_ratio):
-        """The original heuristic check for a heart shape."""
-        # Check aspect ratio
-        if not (0.7 < aspect_ratio < 1.3): 
-            return False
-            
-        try:
-            hull = cv2.convexHull(contour, returnPoints=False)
-            if len(hull) < 3: return False
-            defects = cv2.convexityDefects(contour, hull)
-            if defects is None: return False
-            # Hearts usually have a characteristic set of defects
-            # This is just a guess, but it's part of the heuristic
-            if len(defects) > 2:
-                return True 
-        except cv2.error:
-            return False
-            
-        return False
-
-
+        return hu_moments.flatten()
+    
     def _check_for_shapes(self, board):
-        """Finds contours, checks them with the poly method, and replaces them."""
-        if not self.shape_images:
+        """Finds contours, predicts them with the SVM, and replaces them."""
+        # Don't try to predict if the model failed to load
+        if self.svm_model is None or not self.shape_images:
             return
 
-        print("\n--- Checking for shapes (Poly Method) ---")
+        print("\n--- Checking for shapes (SVM Method) ---")
         canvas_gray = cv2.cvtColor(board, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(canvas_gray, 10, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -593,12 +545,38 @@ class ARDrawingBoard:
         replacements = []
 
         for contour in contours:
-            shape_name = self._get_shape_name_from_contour(contour)
+            # 1. Filter out small noise
+            if cv2.contourArea(contour) < 1500:
+                continue
+                
+            # 2. Get features
+            features = self._get_features_from_contour(contour)
+            features_reshaped = features.reshape(1, -1)
             
-            if shape_name and shape_name in self.shape_images:
-                replacements.append((contour, shape_name))
+            # 3. Scale features
+            scaled_features = self.scaler.transform(features_reshaped)
+            
+            # 4. Predict
+            prediction_proba = self.svm_model.predict_proba(scaled_features)[0]
+            confidence = prediction_proba.max()
+            prediction_index = prediction_proba.argmax()
+            
+            # 5. Check confidence
+            CONF_THRESHOLD = 0.50 # 80% confident
+            shape_name = self.class_names[prediction_index] # <-- MOVED HERE
+
+            if confidence >= CONF_THRESHOLD:
+                print(f"  -> Matched {shape_name.upper()} (Confidence: {confidence*100:.1f}%)")
+                
+                if shape_name in self.shape_images:
+                    replacements.append((contour, shape_name))
+            else:
+                 # This line will now work correctly
+                 print(f"  -> Low confidence match: {shape_name.upper()} (Confidence: {confidence*100:.1f}%)")
+
         
         # Apply all replacements
+        # (This part is identical to your old code, which is good!)
         for contour, shape_name in replacements:
             x, y, w_drawn, h_drawn = cv2.boundingRect(contour)
             

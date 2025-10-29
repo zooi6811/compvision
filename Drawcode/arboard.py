@@ -562,7 +562,7 @@ class ARDrawingBoard:
             prediction_index = prediction_proba.argmax()
             
             # 5. Check confidence
-            CONF_THRESHOLD = 0.50 # 80% confident
+            CONF_THRESHOLD = 0.80 # 80% confident
             shape_name = self.class_names[prediction_index] # <-- MOVED HERE
 
             if confidence >= CONF_THRESHOLD:

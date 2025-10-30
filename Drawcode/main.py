@@ -10,7 +10,7 @@ def main():
     # 2. Initialize the tracker and link it to the board
     # We pass the board's input handler as the tracker's callback.
     # Now, whenever the tracker detects a gesture, it will call board.handle_input_event()
-    tracker = FaceHandTracker(event_callback=board.handle_input_event)
+    tracker = FaceHandTracker(board=board)
 
     # Check if camera opened successfully
     if not board.cap.isOpened():
@@ -53,7 +53,7 @@ def main():
 
         # --- Handle Keyboard Input ---
         # Check for keyboard presses for changing modes, etc.
-        key = cv2.waitKey(10) & 0xFF
+        key = cv2.waitKey(1) & 0xFF
         if not board._handle_key_input(key):
             break # Exit loop if ESC is pressed
 

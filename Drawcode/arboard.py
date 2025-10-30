@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import math  # --- NEW ---
+import time
 import os
 import joblib
 
@@ -15,6 +16,10 @@ class ARDrawingBoard:
         self.ALPHA = 0.6
         self.MOVE_ALPHA = 0.5
         self.PREVIEW_SIZE = 100
+
+        # --- Shape Check Cooldown ---
+        self.SHAPE_CHECK_COOLDOWN = 2.0  # 2-second pause after a check
+        self.last_shape_check_time = 0.0 # Time the last check was run
 
         # --- Shape Detection Setup ---
         self.shape_images = {}
@@ -179,10 +184,19 @@ class ARDrawingBoard:
                 self.drawing_source = None 
                 self.last_point = None
                 
-                # --- Check for shapes ---
-                # Only check if we were in 'draw' mode (not 'erase' mode)
+                # --- Check for shapes (with Cooldown) ---
                 if mode_when_drawing_started == 'draw':
-                    self._check_for_shapes(board)
+                    
+                    current_time = time.time()
+                    if (current_time - self.last_shape_check_time) > self.SHAPE_CHECK_COOLDOWN:
+                        print("Checking for shapes...")
+                        self._check_for_shapes(board)
+                        # Only reset timer IF a check was actually performed
+                        self.last_shape_check_time = time.time() 
+                    else:
+                        remaining = self.SHAPE_CHECK_COOLDOWN - (current_time - self.last_shape_check_time)
+                        print(f"Shape check skipped (cooldown). Please wait {remaining:.1f}s")
+
 
     # ============================================================
     #  COPY SELECTION (UNIFIED)

@@ -17,19 +17,21 @@ FINGER_JOINT_SETS = {
 
 
 class FaceHandTracker:
-    def __init__(self, event_callback=None):
+    def __init__(self, board=None): # <-- MODIFIED: Accept board object
 
-        self.event_callback = event_callback 
+        self.board = board # <-- NEW: Store board object
+        # <-- NEW: Get event callback from the board
+        self.event_callback = board.handle_input_event if board else None 
 
         self.last_gesture = "None"
         self.previous_gesture = "None"
         self.previous_pos = None
         self.gesture_buffer = deque(maxlen=10)
         self.frame_count = 0
-        self.event_callback = event_callback
+        # self.event_callback = event_callback # <-- REMOVED
 
         self.face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
-        self.hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.5, min_tracking_confidence=0.4)
+        self.hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.5)
 
     def process_frame(self, image):
         ih, iw, _ = image.shape
@@ -49,7 +51,7 @@ class FaceHandTracker:
         self.frame_count += 1
         if self.frame_count >= 30:
             majority_gesture = self.get_majority_gesture()
-            print(f"Majority Gesture: {majority_gesture}")
+            # print(f"Majority Gesture: {majority_gesture}") # Optional: uncomment for debugging
             self.frame_count = 0
             self.gesture_buffer.clear()
 
@@ -71,19 +73,32 @@ class FaceHandTracker:
         self.last_gesture = gesture
         self.gesture_buffer.append(gesture)
 
-        # fingertip position
+        # fingertip position (use index finger tip for all actions)
         x = int(landmarks[8].x * iw)
         y = int(landmarks[8].y * ih)
 
         # smoothing
         if self.previous_pos is not None:
-            alpha = 0.3
+            alpha = 0.4
             x = int(alpha * x + (1 - alpha) * self.previous_pos[0])
             y = int(alpha * y + (1 - alpha) * self.previous_pos[1])
 
-        # Gesture-to-event mapping
+        # --- MODIFIED: Gesture-to-event mapping ---
+        
         event = None
 
+        # 1. Set the board's mode based on the gesture
+        if self.board and not self.board.copy_mode and not self.board.manip_mode:
+            if gesture == "Finger_Point":
+                self.board.mode = 'draw'
+            elif gesture == "Erase_Gesture":
+                self.board.mode = 'erase'
+            # Note: If gesture is Open_Palm or Fist, the mode remains what it was.
+            # This allows you to lift your pen (fist) and put it back down
+            # in the same mode without it defaulting back to 'draw'.
+
+        # 2. Create down/move/up events based on the gesture
+        
         # 🖊 Drawing mode: finger point acts as pen tip
         if gesture == "Finger_Point":
             if self.previous_gesture != "Finger_Point":
@@ -92,25 +107,33 @@ class FaceHandTracker:
             else:
                 # continue drawing
                 event = {"type": "move", "x": x, "y": y, "source": "gesture"}
+        
+        # ✌️ Erasing mode: index and middle finger
+        elif gesture == "Erase_Gesture":
+            if self.previous_gesture != "Erase_Gesture":
+                # Erase gesture started → pen down (in erase mode)
+                event = {"type": "down", "x": x, "y": y, "source": "gesture"}
+            else:
+                # continue erasing
+                event = {"type": "move", "x": x, "y": y, "source": "gesture"}
 
         # 🖐 Hover mode: open palm moves cursor but doesn't draw
         elif gesture == "Open_Palm":
-            # --- THIS IS THE CRITICAL CHANGE ---
-            if self.previous_gesture == "Finger_Point":
-                # We were just drawing, so we MUST send an 'up' event first
+            # If we were just drawing OR erasing, send an 'up' event first
+            if self.previous_gesture == "Finger_Point" or self.previous_gesture == "Erase_Gesture":
                 event = {"type": "up", "x": x, "y": y, "source": "gesture"}
                 if self.event_callback:
                     self.event_callback(event) # Send the 'up' event immediately
             
             # Now, always send a 'move' event for the hover
             event = {"type": "move", "x": x, "y": y, "source": "gesture"}
-            # --- END OF CHANGE ---
 
-        # ✊ Any other gesture: if we were drawing before, lift pen up
+        # ✊ Any other gesture: if we were drawing/erasing, lift pen up
         else:
-            if self.previous_gesture == "Finger_Point":
+            if self.previous_gesture == "Finger_Point" or self.previous_gesture == "Erase_Gesture":
                 event = {"type": "up", "x": x, "y": y, "source": "gesture"}
 
+        # --- End of modified section ---
 
         # Send event to drawing system if callback provided
         if event and self.event_callback:
@@ -120,8 +143,14 @@ class FaceHandTracker:
         self.previous_pos = (x, y)
 
         # debug info
-        cv2.putText(image, f"Gesture: {gesture}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 255), 2)
+        # cv2.putText(image, f"Gesture: {gesture}", (10, 30),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 255), 2)
+        
+        # --- NEW: Show current board mode on screen ---
+        # if self.board:
+        #      cv2.putText(image, f"Mode: {self.board.mode.upper()}", (10, 60),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 255), 2)
+
 
     def get_majority_gesture(self):
         if not self.gesture_buffer:
@@ -171,8 +200,9 @@ class FaceHandTracker:
 
     def gesture_recognise(self, hand_direction, thumb_direction, hand_tilt, thumb_tilt, fingers):
         gesture = "Unknown"
+        # --- MODIFIED: Renamed "Peace" to "Erase_Gesture" ---
         if fingers == [0, 1, 1, 0, 0]:
-            gesture = "Peace"
+            gesture = "Erase_Gesture" 
         elif fingers == [1, 1, 1, 1, 1]:
             gesture = "Open_Palm"
         elif fingers == [0, 0, 0, 0, 0]:

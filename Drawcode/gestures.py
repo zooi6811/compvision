@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from collections import deque, Counter
 import mediapipe as mp
+import time # Import time for cooldown management
 
 mp_face_detection = mp.solutions.face_detection
 mp_hands = mp.solutions.hands
@@ -17,10 +18,9 @@ FINGER_JOINT_SETS = {
 
 
 class FaceHandTracker:
-    def __init__(self, board=None): # <-- MODIFIED: Accept board object
-
-        self.board = board # <-- NEW: Store board object
-        # <-- NEW: Get event callback from the board
+    def __init__(self, board=None): 
+        self.board = board 
+        # Note: self.event_callback is for drawing/erasing events.
         self.event_callback = board.handle_input_event if board else None 
 
         self.last_gesture = "None"
@@ -28,7 +28,11 @@ class FaceHandTracker:
         self.previous_pos = None
         self.gesture_buffer = deque(maxlen=10)
         self.frame_count = 0
-        # self.event_callback = event_callback # <-- REMOVED
+
+        # NEW: Variables to store the latest processed hand data for mode switching
+        self.last_mode_data = {'base_gesture': None, 'direction': None} 
+        self.last_hand_direction = 'centered' # Default
+        self.last_fingers_status = [0, 0, 0, 0, 0] # Default
 
         self.face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
         self.hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.5)
@@ -43,115 +47,180 @@ class FaceHandTracker:
         image_rgb.flags.writeable = True
         image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
+        # Default mode data if no hand is detected
+        self.last_mode_data = {'base_gesture': None, 'direction': None} 
+
         if hand_results.multi_hand_landmarks:
             for hand_landmarks in hand_results.multi_hand_landmarks:
                 mp_drawing.draw_landmarks(image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
                 self.process_hand(image, hand_landmarks.landmark, iw, ih)
 
+        # --- NEW: Call mode gesture handler on the board ---
+        if self.board:
+            self.board.handle_mode_gesture(self.last_mode_data)
+        # --- END NEW ---
+
         self.frame_count += 1
         if self.frame_count >= 30:
             majority_gesture = self.get_majority_gesture()
-            # print(f"Majority Gesture: {majority_gesture}") # Optional: uncomment for debugging
             self.frame_count = 0
             self.gesture_buffer.clear()
 
         return image
 
     def process_hand(self, image, landmarks, iw, ih):
-        # bounding box just for visualization
         x_vals = [int(lm.x * iw) for lm in landmarks]
         y_vals = [int(lm.y * ih) for lm in landmarks]
         x_min, x_max = max(min(x_vals) - 20, 0), min(max(x_vals) + 20, iw)
         y_min, y_max = max(min(y_vals) - 20, 0), min(max(y_vals) + 20, ih)
         cv2.rectangle(image, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
 
-        # analyze hand
         direction, tilt, distance = self.estimate_hand_orientation_2d(landmarks, iw, ih)
         thumb_dir, thumb_tilt = self.estimate_thumb_orientation_2d(landmarks, iw, ih)
         fingers = self.fingers_status(landmarks)
+        
+        # Store orientation and status for mode switching
+        self.last_hand_direction = direction
+        self.last_fingers_status = fingers
+        
         gesture = self.gesture_recognise(direction, thumb_dir, tilt, thumb_tilt, fingers)
         self.last_gesture = gesture
         self.gesture_buffer.append(gesture)
 
-        # fingertip position (use index finger tip for all actions)
+        # --- NEW: Update the mode gesture data dictionary ---
+        self.last_mode_data = self.get_mode_gesture_data(gesture, direction)
+        # --- END NEW ---
+
         x = int(landmarks[8].x * iw)
         y = int(landmarks[8].y * ih)
 
-        # smoothing
         if self.previous_pos is not None:
             alpha = 0.4
             x = int(alpha * x + (1 - alpha) * self.previous_pos[0])
             y = int(alpha * y + (1 - alpha) * self.previous_pos[1])
 
-        # --- MODIFIED: Gesture-to-event mapping ---
+        # --- MODIFIED: Check for Fist to finalize selection ---
+        # This runs when the gesture *first* becomes a fist
+        if gesture == "Fist" and self.previous_gesture != "Fist":
+            if self.board:
+                # Call the public method on the board
+                self.board.trigger_selection_finalize()
+                
+        # --- Gesture-to-event mapping (Drawing/Erasing) ---
         
         event = None
 
-        # 1. Set the board's mode based on the gesture
-        if self.board and not self.board.copy_mode and not self.board.manip_mode:
-            if gesture == "Finger_Point":
-                self.board.mode = 'draw'
-            elif gesture == "Erase_Gesture":
-                self.board.mode = 'erase'
-            # Note: If gesture is Open_Palm or Fist, the mode remains what it was.
-            # This allows you to lift your pen (fist) and put it back down
-            # in the same mode without it defaulting back to 'draw'.
-
         # 2. Create down/move/up events based on the gesture
         
-        # 🖊 Drawing mode: finger point acts as pen tip
+        # 🖊 "left-click"
         if gesture == "Finger_Point":
             if self.previous_gesture != "Finger_Point":
-                # finger started pointing → pen down
                 event = {"type": "down", "x": x, "y": y, "source": "gesture"}
             else:
-                # continue drawing
                 event = {"type": "move", "x": x, "y": y, "source": "gesture"}
         
-        # ✌️ Erasing mode: index and middle finger
-        elif gesture == "Erase_Gesture":
-            if self.previous_gesture != "Erase_Gesture":
-                # Erase gesture started → pen down (in erase mode)
-                event = {"type": "down", "x": x, "y": y, "source": "gesture"}
+        # ✌️ "right-click"
+        elif gesture == "Double_Point_Gesture":
+            if self.previous_gesture != "Double_Point_Gesture":
+                event = {"type": "right_down", "x": x, "y": y, "source": "gesture"}
             else:
-                # continue erasing
                 event = {"type": "move", "x": x, "y": y, "source": "gesture"}
 
-        # 🖐 Hover mode: open palm moves cursor but doesn't draw
-        elif gesture == "Open_Palm":
-            # If we were just drawing OR erasing, send an 'up' event first
-            if self.previous_gesture == "Finger_Point" or self.previous_gesture == "Erase_Gesture":
+        # 🖐 Hover / Release
+        elif gesture == "Open_Palm" or gesture == "Pinky_Up": # Added Pinky_Up for smoother release
+            if self.previous_gesture == "Finger_Point":
                 event = {"type": "up", "x": x, "y": y, "source": "gesture"}
-                if self.event_callback:
-                    self.event_callback(event) # Send the 'up' event immediately
+            elif self.previous_gesture == "Double_Point_Gesture":
+                event = {"type": "right_up", "x": x, "y": y, "source": "gesture"}
             
-            # Now, always send a 'move' event for the hover
+            if event and self.event_callback:
+                self.event_callback(event) 
+            
+            # Still send a move event to update the cursor position
             event = {"type": "move", "x": x, "y": y, "source": "gesture"}
 
-        # ✊ Any other gesture: if we were drawing/erasing, lift pen up
+        # ✊ Any other gesture (e.g., Fist, Unknown): Lift all pens
         else:
-            if self.previous_gesture == "Finger_Point" or self.previous_gesture == "Erase_Gesture":
+            if self.previous_gesture == "Finger_Point":
                 event = {"type": "up", "x": x, "y": y, "source": "gesture"}
+            elif self.previous_gesture == "Double_Point_Gesture":
+                event = {"type": "right_up", "x": x, "y": y, "source": "gesture"}
 
-        # --- End of modified section ---
-
-        # Send event to drawing system if callback provided
         if event and self.event_callback:
             self.event_callback(event)
 
         self.previous_gesture = gesture
         self.previous_pos = (x, y)
 
-        # debug info
-        # cv2.putText(image, f"Gesture: {gesture}", (10, 30),
-        #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 255), 2)
+    # ============================================================
+    #  NEW MODE GESTURE DATA GENERATOR
+    # ============================================================
+    
+    def get_mode_gesture_data(self, current_gesture, hand_direction):
+        """
+        Generates the simplified data dictionary required by ARDrawingBoard's mode handler.
+        """
+        data = {'base_gesture': None, 'direction': None}
         
-        # --- NEW: Show current board mode on screen ---
-        # if self.board:
-        #      cv2.putText(image, f"Mode: {self.board.mode.upper()}", (10, 60),
-        #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 255, 255), 2)
+        if current_gesture == "Pinky_Up":
+            data['base_gesture'] = 'pinky_up'
+            data['direction'] = hand_direction
+            
+        return data
 
 
+    # ============================================================
+    #  UPDATED GESTURE RECOGNITION
+    # ============================================================
+
+    def gesture_recognise(self, hand_direction, thumb_direction, hand_tilt, thumb_tilt, fingers):
+        """
+        Detects specific hand gestures based on finger status and orientation.
+        """
+        
+        # fingers list: [Thumb, Index, Middle, Ring, Pinky] (1=straight, 0=bent)
+
+        # --- NEW: Pinky Up for Mode Switching ---
+        # Thumb: Bent(0), Index: Bent(0), Middle: Bent(0), Ring: Bent(0), Pinky: Straight(1)
+        if fingers[0] == 0 and fingers[1] == 0 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 1:
+             return "Pinky_Up"
+        # --- END NEW ---
+
+        gesture = "Unknown"
+        
+        # Double Point / V Sign
+        if fingers == [0, 1, 1, 0, 0] or fingers == [1, 1, 1, 0, 0]:
+            gesture = "Double_Point_Gesture" 
+        # Open Palm
+        elif fingers == [1, 1, 1, 1, 1]:
+            gesture = "Open_Palm"
+        # Fist
+        elif fingers == [0, 0, 0, 0, 0]:
+            gesture = "Fist"
+        # Spider (Index and Pinky up)
+        elif fingers == [0, 1, 0, 0, 1] and hand_tilt == "up":
+            gesture = "Spider"
+        # Thumbs
+        elif fingers == [1, 0, 0, 0, 0]:
+            if thumb_tilt == "up":
+                gesture = "Thumbs_Up"
+            elif thumb_tilt == "down":
+                gesture = "Thumbs_Down"
+            elif thumb_direction == "right":
+                gesture = "Thumbs_Right"
+            elif thumb_direction == "left":
+                gesture = "Thumbs_Left"
+        # Single Point
+        elif fingers == [0, 1, 0, 0, 0] or fingers == [1, 1, 0, 0, 0]:
+            gesture = "Finger_Point"
+        # Middle Finger (Assert Dominance)
+        elif fingers == [0, 0, 1, 0, 0] or fingers == [1, 0, 1, 0, 0]:
+            if hand_tilt == "up":
+                gesture = "Assert_Dominance"
+                
+        return gesture
+
+    # --- (All other helper functions are unchanged) ---
     def get_majority_gesture(self):
         if not self.gesture_buffer:
             return "None"
@@ -167,7 +236,6 @@ class FaceHandTracker:
         y_avg = (y5 + y17) / 2
         dist = np.hypot(x9 - x13, y9 - y13) / 20
         dx, dy = x0 - x_avg, y0 - y_avg
-
         direction = 'right' if dx < (-30 * dist) else 'left' if dx > (30 * dist) else 'centered'
         tilt = 'up' if dy > (30 * dist) else 'down' if dy < (-30 * dist) else 'level'
         return direction, tilt, dist
@@ -179,7 +247,6 @@ class FaceHandTracker:
         x13, y13 = lm[13].x * iw, lm[13].y * ih
         dist = np.hypot(x9 - x13, y9 - y13) / 20
         dx, dy = x0 - x2, y0 - y2
-
         direction = 'left' if dx > (30 * dist) else 'right' if dx < (-30 * dist) else 'neutral'
         tilt = 'up' if dy > (30 * dist) else 'down' if dy < (-30 * dist) else 'level'
         return direction, tilt
@@ -197,31 +264,3 @@ class FaceHandTracker:
             )
             status.append(1 if straight else 0)
         return status
-
-    def gesture_recognise(self, hand_direction, thumb_direction, hand_tilt, thumb_tilt, fingers):
-        gesture = "Unknown"
-        # --- MODIFIED: Renamed "Peace" to "Erase_Gesture" ---
-        if fingers == [0, 1, 1, 0, 0]:
-            gesture = "Erase_Gesture" 
-        elif fingers == [1, 1, 1, 1, 1]:
-            gesture = "Open_Palm"
-        elif fingers == [0, 0, 0, 0, 0]:
-            gesture = "Fist"
-        elif fingers == [0, 1, 0, 0, 1] and hand_tilt == "up":
-            gesture = "Spider"
-        elif fingers == [1, 0, 0, 0, 0]:
-            if thumb_tilt == "up":
-                gesture = "Thumbs_Up"
-            elif thumb_tilt == "down":
-                gesture = "Thumbs_Down"
-            elif thumb_tilt == "right":
-                gesture = "Thumbs_Right"
-            elif thumb_tilt == "left":
-                gesture = "Thumbs_Left"
-        elif fingers == [0, 1, 0, 0, 0] or fingers == [1, 1, 0, 0, 0]:
-            # regardless of orientation
-            gesture = "Finger_Point"
-        elif fingers == [0, 0, 1, 0, 0] or fingers == [1, 0, 1, 0, 0]:
-            if hand_tilt == "up":
-                gesture = "Assert_Dominance"
-        return gesture

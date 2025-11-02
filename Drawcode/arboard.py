@@ -18,20 +18,22 @@ class ARDrawingBoard:
         self.PREVIEW_SIZE = 100
 
         # --- Cooldowns ---
-        self.SHAPE_CHECK_COOLDOWN = 2.0
-        self.last_shape_check_time = 0.0
         self.PASTE_COOLDOWN = 2.0
         self.last_paste_time = 0.0
 
         # --- Gesture State (NEW) ---
-        self.last_mode_gesture = None  # Tracks the last gesture that successfully set a mode
+        self.last_mode_gesture = None
         self.MODE_GESTURE_COOLDOWN = 1.0
         self.last_mode_change_time = 0.0
 
-
         # --- NEW: Cooldown for Tag Interaction ---
-        self.TAG_COOLDOWN = 1.0  # Seconds between tag triggers
+        self.TAG_COOLDOWN = 1.0
         self.last_tag_trigger_time = 0.0
+        
+        # --- Shape Check Idle Timer ---
+        self.SHAPE_IDLE_TIME = 1.5  # idle time
+        self.last_draw_activity_time = 0.0 # Time of last 'draw' event
+        self.shape_check_needed = False # Flag to run check after idling
 
         # --- Shape Detection Setup ---
         self.shape_images = {}
@@ -65,7 +67,6 @@ class ARDrawingBoard:
         self.drawing = False
         self.last_point = None
         self.drawing_source = None  
-        # REMOVED: self.switch_mode = False 
         self.cursor_pos = None
         self.action_mode = None # Tracks 'draw' vs 'erase'
 
@@ -92,54 +93,35 @@ class ARDrawingBoard:
 
 
     # ============================================================
-    #  NEW: TAG INTERACTION HANDLER (MODIFIED)
+    #  NEW: TAG INTERACTION HANDLER (Unchanged)
     # ============================================================
     def check_tag_interaction(self, detected_tags):
-        """
-        Checks if the cursor is hovering over a known action tag
-        and triggers the corresponding board action.
-        """
-        # 1. Check if we have a cursor position from the hand tracker
         if self.cursor_pos is None:
             return
 
-        # 2. Check if the cooldown has passed
         current_time = time.time()
         if (current_time - self.last_tag_trigger_time) < self.TAG_COOLDOWN:
             return
             
         cx, cy = self.cursor_pos
 
-        # 3. Check for collision between cursor and tag bounding boxes
         for marker_id, (x, y, w, h) in detected_tags.items():
             
-            # Check if cursor (cx, cy) is inside the tag's bounding box (x, y, w, h)
             if (cx > x) and (cx < x + w) and (cy > y) and (cy < y + h):
-                
-                # --- ACTION MAPPING ---
                 
                 if marker_id == 6:
                     print(f"ACTION: Tag {marker_id} hit -> Page Previous")
-                    # NO LONGER CHECKING self.switch_mode
                     self.trigger_page_prev()
-                    self.last_tag_trigger_time = current_time # Reset cooldown
-                    break # Only one action per frame
+                    self.last_tag_trigger_time = current_time 
+                    break 
 
                 elif marker_id == 8:
                     print(f"ACTION: Tag {marker_id} hit -> Page Next")
-                    # NO LONGER CHECKING self.switch_mode
                     self.trigger_page_next()
-                    self.last_tag_trigger_time = current_time # Reset cooldown
-                    break # Only one action per frame
+                    self.last_tag_trigger_time = current_time 
+                    break 
                 
                 # --- Add more 'elif marker_id == X:' here for other actions ---
-                # Example for changing modes directly:
-                # elif marker_id == 3:
-                #    print(f"ACTION: Tag {marker_id} hit -> Set Mode Draw")
-                #    self.set_mode_draw()
-                #    self.last_tag_trigger_time = current_time
-                #    break
-
 
     # ============================================================
     #  UNIFIED INPUT HANDLER (Unchanged)
@@ -195,11 +177,16 @@ class ARDrawingBoard:
         t = event["type"]
         src = event["source"] 
 
+        current_time = time.time() # Get current time
+
         if t == "down":
             self.drawing = True
             self.drawing_source = src 
             self.last_point = (x, y)
             self.action_mode = 'draw'
+            
+            self.last_draw_activity_time = current_time
+            self.shape_check_needed = True # A drawing has started
         
         elif t == "right_down":
             self.drawing = True
@@ -211,29 +198,18 @@ class ARDrawingBoard:
             if src == self.drawing_source: 
                 if self.action_mode == 'draw':
                     cv2.line(board, self.last_point, (x, y), self.DRAW_COLOR, self.DRAW_RADIUS)
+                    self.last_draw_activity_time = current_time
                 elif self.action_mode == 'erase':
                     cv2.line(board, self.last_point, (x, y), self.ERASE_COLOR, self.ERASE_RADIUS)
                 self.last_point = (x, y)
         
         elif t == "up" or t == "right_up":
             if src == self.drawing_source:
-                mode_when_action_started = self.action_mode
-                
                 self.drawing = False
                 self.drawing_source = None 
                 self.last_point = None
                 self.action_mode = None
-                
-                if mode_when_action_started == 'draw':
-                    current_time = time.time()
-                    if (current_time - self.last_shape_check_time) > self.SHAPE_CHECK_COOLDOWN:
-                        print("Checking for shapes...")
-                        self._check_for_shapes(board)
-                        self.last_shape_check_time = time.time() 
-                    else:
-                        remaining = self.SHAPE_CHECK_COOLDOWN - (current_time - self.last_shape_check_time)
-                        print(f"Shape check skipped (cooldown). Please wait {remaining:.1f}s")
-
+                # Shape check logic is handled in render_overlay
 
     # ============================================================
     #  COPY SELECTION (Unchanged)
@@ -394,6 +370,21 @@ class ARDrawingBoard:
     #  MAIN LOOP (Unchanged)
     # ============================================================
     def render_overlay(self, frame):
+        
+        # --- Idle Shape Check ---
+        current_time = time.time()
+        if self.shape_check_needed and \
+           (current_time - self.last_draw_activity_time) > self.SHAPE_IDLE_TIME:
+            
+            if not self.copy_mode and not self.manip_mode:
+                # This print statement will let you know the check is starting
+                print(f"Idle for {self.SHAPE_IDLE_TIME}s, checking for shapes...")
+                board = self.boards[self.current_board_index]
+                self._check_for_shapes(board) 
+            
+            self.shape_check_needed = False 
+
+        # --- Original render_overlay code ---
         overlay = self.boards[self.current_board_index].copy()
         self._draw_copy_highlight(overlay)
         self._draw_manip_highlight(overlay)
@@ -410,10 +401,9 @@ class ARDrawingBoard:
         return combined
 
     # ============================================================
-    #  UI DRAWING HELPERS (MODIFIED)
+    #  UI DRAWING HELPERS (Unchanged)
     # ============================================================
     def _draw_mode_text(self, img):
-        # MODIFIED: Removed self.switch_mode check
         mode_str = self.mode.upper()
         text = f"Mode: {mode_str} | Board: {self.current_board_index + 1}/{self.NUM_BOARDS}"
         cv2.putText(img, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
@@ -485,27 +475,22 @@ class ARDrawingBoard:
             cv2.rectangle(combined, (x_offset, y_offset), (x_offset + new_w, y_offset + new_h), (255, 255, 255), 1)
 
     # ============================================================
-    #  KEY INPUT HANDLER (MODIFIED)
+    #  KEY INPUT HANDLER (Unchanged)
     # ============================================================
     
     def _handle_key_input(self, key):
         if key == 27:  # ESC
             return False
 
-        # --- Page Switching Keys (Global Actions) ---
-        # NO LONGER CHECKING self.switch_mode
         if key == ord('q'):
-            self.trigger_page_prev() # Use new method
+            self.trigger_page_prev() 
             return True 
         elif key == ord('w'):
-            self.trigger_page_next() # Use new method
+            self.trigger_page_next() 
             return True 
             
-        # --- Mode Switching Keys ---
         if key == ord('d'):
             self.set_mode_draw()
-
-        # REMOVED: elif key == ord('p'): -> self.set_mode_page()
 
         elif key == ord('c'):
             self.set_mode_copy()
@@ -513,17 +498,17 @@ class ARDrawingBoard:
         elif key == ord('m'):
             self.set_mode_manip()
 
-        # --- Action Keys ---
         elif key == ord('s'):
-            self.trigger_selection_finalize() # Use new method
+            self.trigger_selection_finalize() 
 
         elif key == 32:  # SPACE to clear current board
             self.boards[self.current_board_index][:] = 0
+            self.shape_check_needed = False 
 
         return True
 
     # ============================================================
-    #  SHAPE DETECTION (Unchanged)
+    #  SHAPE DETECTION (MODIFIED)
     # ============================================================
     @staticmethod
     def _overlay_transparent_image(background, overlay, x, y):
@@ -540,7 +525,7 @@ class ARDrawingBoard:
         overlay_rgb = overlay[y1_overlay:y2_overlay, x1_overlay:x2_overlay, :3]
         for c in range(0, 3):
             background[y1:y2, x1:x2, c] = (alpha * overlay_rgb[:, :, c] +
-                                           alpha_inv * background[y1:y2, x1:x2, c])
+                                          alpha_inv * background[y1:y2, x1:x2, c])
 
     def _get_features_from_contour(self, contour):
         moments = cv2.moments(contour)
@@ -550,15 +535,36 @@ class ARDrawingBoard:
         return hu_moments.flatten()
     
     def _check_for_shapes(self, board):
+        """
+        Finds contours for all separate blobs, predicts them, and replaces them.
+        Uses MORPH_OPEN to separate blobs that are drawn too close.
+        """
         if self.svm_model is None or not self.shape_images:
+            print("  -> Shape check skipped: Model not loaded.")
             return
-        print("\n--- Checking for shapes (SVM Method) ---")
+
+        print("\n--- Checking for shapes (Blob Method) ---")
         canvas_gray = cv2.cvtColor(board, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(canvas_gray, 10, 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # --- FIXED: Use a less aggressive kernel ---
+        # A 3x3 kernel with 1 iteration is safer.
+        # It erodes 1 pixel, then dilates 1 pixel, just enough
+        # to break thin connections without destroying shapes.
+        kernel = np.ones((3, 3), np.uint8) 
+        thresh_opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+        
+        contours, _ = cv2.findContours(thresh_opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
         replacements = []
+        contours_found_and_kept = 0 # Debug counter
+        
         for contour in contours:
-            if cv2.contourArea(contour) < 1500: continue
+            
+            if cv2.contourArea(contour) < 1500: # Tune this area value if needed
+                continue
+            
+            contours_found_and_kept += 1 # Add to debug counter
             features = self._get_features_from_contour(contour)
             features_reshaped = features.reshape(1, -1)
             scaled_features = self.scaler.transform(features_reshaped)
@@ -566,19 +572,31 @@ class ARDrawingBoard:
             confidence = prediction_proba.max()
             prediction_index = prediction_proba.argmax()
             shape_name = self.class_names[prediction_index] 
-            if confidence >= 0.80:
+            
+            CONF_THRESHOLD = 0.80 
+            if confidence >= CONF_THRESHOLD:
                 print(f"  -> Matched {shape_name.upper()} (Confidence: {confidence*100:.1f}%)")
                 if shape_name in self.shape_images:
                     replacements.append((contour, shape_name))
             else:
                  print(f"  -> Low confidence match: {shape_name.upper()} (Confidence: {confidence*100:.1f}%)")
+
+        # --- NEW: Debug print ---
+        print(f"  -> Found {len(contours)} total blobs, kept {contours_found_and_kept} after filtering.")
+
         for contour, shape_name in replacements:
             x, y, w_drawn, h_drawn = cv2.boundingRect(contour)
+            
+            # Erase the blob from the *original* board
+            # We must use the contour found on the 'opened' image
             cv2.drawContours(board, [contour], -1, self.ERASE_COLOR, cv2.FILLED)
+            
             replacement_img = self.shape_images[shape_name]
-            padding_factor = 1.2  
-            new_w = int(w_drawn * padding_factor)  
+            
+            padding_factor = 1.2 
+            new_w = int(w_drawn * padding_factor)
             new_h = int(h_drawn * padding_factor)
+            
             if new_w > 0 and new_h > 0:
                 resized_img = cv2.resize(replacement_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 overlay_x = x - (new_w - w_drawn) // 2
@@ -586,22 +604,12 @@ class ARDrawingBoard:
                 self._overlay_transparent_image(board, resized_img, overlay_x, overlay_y)
 
     # ============================================================
-    #  MODE MANAGEMENT (MODIFIED)
+    #  MODE MANAGEMENT (Unchanged)
     # ============================================================
 
-
     def handle_mode_gesture(self, gesture_input):
-        """
-        Switches the main board mode (draw/copy/manip) based on a
-        combination of a base gesture (pinky up) and a directional cue.
-
-        Args:
-            gesture_input (dict): Must contain 'base_gesture' (str, e.g., 'pinky_up')
-                                  and 'direction' (str, e.g., 'centered', 'left', 'right').
-        """
         current_time = time.time()
         
-        # Cooldown check: Prevents rapid mode switching
         if (current_time - self.last_mode_change_time) < self.MODE_GESTURE_COOLDOWN:
             return
         
@@ -610,23 +618,18 @@ class ARDrawingBoard:
         
         target_mode = None
         
-        # Check for the base trigger gesture (Pinky Up)
         if base_gesture == 'pinky_up':
             if direction == 'centered':
                 target_mode = 'draw'
             elif direction == 'left':
                 target_mode = 'copy'
             elif direction == 'right':
-                target_mode = 'manip' # Manipulate/Move
+                target_mode = 'manip' 
         
-        # If a valid mode is identified
         if target_mode and target_mode != self.mode:
             
-            # Check if the mode gesture has been 'released' (None) since the last change
-            # to prevent a single sustained gesture from switching modes repeatedly.
             if target_mode != self.last_mode_gesture: 
                 
-                # Call the appropriate mode setter
                 if target_mode == 'draw':
                     self.set_mode_draw()
                 elif target_mode == 'copy':
@@ -634,19 +637,15 @@ class ARDrawingBoard:
                 elif target_mode == 'manip':
                     self.set_mode_manip()
                     
-                # Update state
                 self.last_mode_gesture = target_mode
                 self.last_mode_change_time = current_time
         
-        # If the base gesture is no longer active, reset last_mode_gesture
         if base_gesture != 'pinky_up':
             self.last_mode_gesture = None
 
     def _reset_modes(self, draw=False):
-        # Clear all mode flags and selections
         self.copy_mode = False
         self.manip_mode = False
-        # REMOVED: self.switch_mode = False
         self.selection_points.clear()
         self.manip_selection.clear()
         self.clipboard_img = None
@@ -659,6 +658,8 @@ class ARDrawingBoard:
         self.last_point = None
         self.manip_pos = None
         self.action_mode = None
+        
+        self.shape_check_needed = False
 
         if draw:
             self.mode = 'draw'
@@ -677,7 +678,7 @@ class ARDrawingBoard:
         """Toggles the 'copy' mode."""
         self._stamp_manip_img()
         if self.copy_mode:
-            self._reset_modes(draw=True) # Toggle off
+            self._reset_modes(draw=True) 
             print("Mode set to DRAW (toggled off copy)")
         else:
             self._reset_modes()
@@ -689,7 +690,7 @@ class ARDrawingBoard:
         """Toggles the 'manipulate' mode."""
         self._stamp_manip_img()
         if self.manip_mode:
-            self._reset_modes(draw=True) # Toggle off
+            self._reset_modes(draw=True) 
             print("Mode set to DRAW (toggled off manipulate)")
         else:
             self._reset_modes()
@@ -697,19 +698,15 @@ class ARDrawingBoard:
             self.mode = 'manipulate'
             print("Mode set to MANIPULATE")
 
-    # REMOVED: def set_mode_page(self):
-
     # --- NEW: Public methods for actions (MODIFIED) ---
 
     def trigger_page_next(self):
         """Switches to the next board."""
-        # Removed self.switch_mode check, now always switches
         self.current_board_index = (self.current_board_index + 1) % self.NUM_BOARDS
         print(f"Switched to board {self.current_board_index + 1}")
 
     def trigger_page_prev(self):
         """Switches to the previous board."""
-        # Removed self.switch_mode check, now always switches
         self.current_board_index = (self.current_board_index - 1) % self.NUM_BOARDS
         print(f"Switched to board {self.current_board_index + 1}")
 

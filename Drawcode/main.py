@@ -89,8 +89,8 @@ def main():
         
         if key == ord('d'):
             # This will show the debug on the *original* frame if you implement it
-            custom_tracker.DEBUG = not custom_tracker.DEBUG
-            print(f"\nSet custom_tracker.DEBUG to {custom_tracker.DEBUG}")
+            tracker_tags.DEBUG = not tracker_tags.DEBUG
+            print(f"\nSet custom_tracker.DEBUG to {tracker_tags.DEBUG}")
 
         elif not board._handle_key_input(key):
             break

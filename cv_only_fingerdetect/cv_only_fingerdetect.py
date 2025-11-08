@@ -1,8 +1,6 @@
 # Attempt at making a solid finger-tracking solution using only CV
 # Uses contours + convex features to determine where the drawing finger (sticking up on a hand) is. 
 
-# Problem with this one is that there are times when the face is inside the frame and intersects with the hand, it might become part of the detected hand. 
-
 
 import cv2
 import numpy as np
@@ -13,7 +11,7 @@ import time
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
 
-# thresholds based on personal experimentation
+# thresholds based on personal experimentation (can use colour picker function)
 SKIN_HSV_LOWER = np.array([1, 70, 155])
 SKIN_HSV_UPPER = np.array([12, 125, 254])
 
@@ -42,7 +40,7 @@ def get_hand_centroid(contour):
     return (cx, cy)
     
 
-# -------------------- UTILITY FUNCTIONS --------------------
+# UTILITY FUNCTIONS: -------------------------------------------------------
 def setup_camera(width=FRAME_WIDTH, height=FRAME_HEIGHT):
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -51,7 +49,7 @@ def setup_camera(width=FRAME_WIDTH, height=FRAME_HEIGHT):
 
 
 def get_skin_mask(frame):
-    """Return a binary mask where skin pixels are white."""
+    "## Return a binary mask where skin pixels are white
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, SKIN_HSV_LOWER, SKIN_HSV_UPPER)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
@@ -62,7 +60,7 @@ def get_skin_mask(frame):
 
 
 def find_fingertip(contour):
-    """Detect fingertip from hand contour."""
+    ## Detect fingertip from hand contour
     if contour is None or len(contour) < 5:
         return None
     hull = cv2.convexHull(contour, returnPoints=False)
@@ -100,7 +98,7 @@ def show_hsv(event, x, y, flags, param):
         print(f"HSV at ({x},{y}): {hsv[y, x]}")
 
 def smooth_points(pts):
-    """Return averaged coordinates from deque of points for smoothing."""
+    ## Return averaged coordinates from deque of points for smoothing
     if not pts:
         return None
     avg_x = int(sum([p[0] for p in pts]) / len(pts))
@@ -108,7 +106,7 @@ def smooth_points(pts):
     return (avg_x, avg_y)
 
 def select_hand_contour(contours, frame_height):
-    """Return the contour most likely to be the hand."""
+    ## Return the contour most likely to be the hand
     candidates = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -132,13 +130,13 @@ def select_hand_contour(contours, frame_height):
 
 
 def clear_canvas_and_tracking(canvas, pts):
-    """Clear canvas, tracked points, and reset fingertip tracking."""
+    ## Clear canvas, tracked points, and reset fingertip tracking
     canvas[:] = 0
     pts.clear()
     return None  # This can reset p0 in main loop
 
 
-
+# Main function
 def main():
     cap = setup_camera()
     canvas = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
@@ -161,11 +159,11 @@ def main():
         frame_for_hsv = frame.copy()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # --- Skin detection ---
+        # Skin detection: 
         mask = get_skin_mask(frame)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # --- Select hand contour robustly ---
+        # Select hand contour 
         hand_contour = select_hand_contour(contours, FRAME_HEIGHT)
 
         if hand_contour is not None:
@@ -188,29 +186,29 @@ def main():
             tracking_status = "none"
             p0 = None
 
-        # --- Smooth fingertip for drawing ---
+        # Smoothening fingertip detection for drawing
         smoothed = smooth_points(pts)
         if smoothed and len(pts) >= 2:
             draw_on_canvas(canvas, pts[1], smoothed)
             cv2.circle(frame, smoothed, 5, (0, 255, 255), -1)  # smoothed point
 
-        # --- Overlay and FPS ---
+        # Overlay and FPS 
         overlay = overlay_canvas(frame, canvas)
         curr_time = time.time()
         fps = 1.0 / (curr_time - prev_time)
         prev_time = curr_time
 
-        # Draw status
+        # Draw tracking status
         color = (200, 200, 200)
         text = f"Status: {tracking_status}"
         cv2.putText(overlay, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         cv2.putText(overlay, f"FPS: {fps:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
 
-        # --- Display ---
+        # Display mask and canvas
         cv2.imshow('mask', mask)
         cv2.imshow('draw', overlay)
 
-        # --- Controls ---
+        # Keyboard controls
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
@@ -221,18 +219,12 @@ def main():
             p0 = None
             pts.clear()
 
-        # elif key == ord('c'):
-        #     clear_canvas(canvas, pts)
-
-        # elif key == ord('r'):
-        #     p0 = clear_canvas_and_tracking(canvas, pts)
-
 
     cap.release()
     cv2.destroyAllWindows()
 
 
-# Function helps to find and tune skin colour thresholds
+# Separate function helps to find and tune skin colour thresholds (pixel with mouseclick shows thresholds in terminal)
 def color_picker():
     cap = cv2.VideoCapture(0)
 
@@ -267,8 +259,7 @@ def color_picker():
     cv2.destroyAllWindows()
 
 
-# -------------------- ENTRY POINT --------------------
+
 if __name__ == "__main__":
     main()
-    # color_picker()
 

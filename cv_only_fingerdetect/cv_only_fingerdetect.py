@@ -21,7 +21,7 @@ DRAW_COLOR = (0, 0, 255)
 THICKNESS = 4
 ALPHA = 0.8
 
-# Optical flow params
+
 lk_params = dict(
     winSize=(15, 15),
     maxLevel=2,
@@ -40,7 +40,7 @@ def get_hand_centroid(contour):
     return (cx, cy)
     
 
-# UTILITY FUNCTIONS: -------------------------------------------------------
+# UTILITY FUNCTIONS
 def setup_camera(width=FRAME_WIDTH, height=FRAME_HEIGHT):
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -49,7 +49,7 @@ def setup_camera(width=FRAME_WIDTH, height=FRAME_HEIGHT):
 
 
 def get_skin_mask(frame):
-    "## Return a binary mask where skin pixels are white
+    ## Return a binary mask where skin pixels are white
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, SKIN_HSV_LOWER, SKIN_HSV_UPPER)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))

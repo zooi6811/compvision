@@ -1,3 +1,5 @@
+# Tried adding optical flow to improve tracking
+
 import cv2
 import numpy as np
 from collections import deque
@@ -22,7 +24,7 @@ lk_params = dict(
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
 )
 
-# -------------------- HELPER FUNCTIONS --------------------
+# -------------------- MODULAR FUNCTIONS --------------------
 def setup_camera(width=FRAME_WIDTH, height=FRAME_HEIGHT):
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -97,7 +99,6 @@ def overlay_canvas(frame, canvas):
     return cv2.addWeighted(frame, 1.0, canvas, ALPHA, 0)
 
 
-# -------------------- LUCAS–KANADE TRACKING --------------------
 def track_fingertip_with_LK(prev_gray, curr_gray, p0):
     """Track fingertip using Lucas–Kanade optical flow."""
     if prev_gray is None or p0 is None:
@@ -109,7 +110,8 @@ def track_fingertip_with_LK(prev_gray, curr_gray, p0):
     return p1, new_point, True
 
 
-# -------------------- MAIN --------------------
+# -------------------- MAIN FUNCTION --------------------
+
 def main():
     cap = setup_camera()
     canvas = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
@@ -126,7 +128,7 @@ def main():
         frame = cv2.flip(frame, 1)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # --- Detect fingertip (when not tracking) ---
+        # Detect fingertip with previous method (when not tracking) 
         mask = get_skin_mask(frame)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         hand_contour = select_hand_contour(contours, FRAME_HEIGHT)
@@ -141,7 +143,7 @@ def main():
                 old_gray = gray.copy()
                 tracking_status = "detect"
 
-        # --- If already tracking, update using LK ---
+        # If already tracking, update using LK optical flow
         elif p0 is not None:
             p1, new_point, ok = track_fingertip_with_LK(old_gray, gray, p0)
             if ok:
@@ -153,7 +155,7 @@ def main():
                 p0 = None
                 tracking_status = "lost"
 
-        # --- Drawing ---
+        # Drawing 
         smoothed = smooth_points(pts)
         if smoothed and len(pts) >= 2:
             draw_on_canvas(canvas, pts[1], smoothed)
@@ -189,7 +191,7 @@ def main():
 
 
 
-# Function helps to find and tune skin colour thresholds
+# Separate function that helps to find and tune skin colour thresholds
 def color_picker():
     cap = cv2.VideoCapture(0)
 
@@ -223,44 +225,9 @@ def color_picker():
     cap.release()
     cv2.destroyAllWindows()
 
-
-
-# Function helps to find and tune skin colour thresholds
-def color_picker():
-    cap = cv2.VideoCapture(0)
-
-    def show_values(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            frame = param
-            bgr = frame[y, x]
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[y, x]
-            ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)[y, x]
-            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)[y, x]
-            print(f"Pixel at ({x},{y}):")
-            print(f" BGR  = {bgr}")
-            print(f" HSV  = {hsv}")
-            print(f" YCrCb= {ycrcb}")
-            print(f" LAB  = {lab}\n")
-
-    cv2.namedWindow('Color Picker')
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = cv2.flip(frame, 1)
-        cv2.setMouseCallback('Color Picker', show_values, param=frame)
-        cv2.imshow('Color Picker', frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
 
     
-# -------------------- ENTRY POINT --------------------
+
 if __name__ == "__main__":
     main()
     # color_picker()

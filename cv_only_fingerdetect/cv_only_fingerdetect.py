@@ -1,10 +1,8 @@
-# One attempt at making a solid finger-tracking solution using only CV
+# Attempt at making a solid finger-tracking solution using only CV
 # Uses contours + convex features to determine where the drawing finger (sticking up on a hand) is. 
-# Can form part of the the storyline for why we wanted to move on to media pipe and ML stuff
 
 # Problem with this one is that there are times when the face is inside the frame and intersects with the hand, it might become part of the detected hand. 
 
-# After some digging around, I kind of lowkey gave up finding a large enough dataset for pictures of hand with index finger pointing; so didnt really do base ML stuff
 
 import cv2
 import numpy as np
@@ -233,6 +231,44 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
 
+
+# Function helps to find and tune skin colour thresholds
+def color_picker():
+    cap = cv2.VideoCapture(0)
+
+    def show_values(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            frame = param
+            bgr = frame[y, x]
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[y, x]
+            ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)[y, x]
+            lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)[y, x]
+            print(f"Pixel at ({x},{y}):")
+            print(f" BGR  = {bgr}")
+            print(f" HSV  = {hsv}")
+            print(f" YCrCb= {ycrcb}")
+            print(f" LAB  = {lab}\n")
+
+    cv2.namedWindow('Color Picker')
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.flip(frame, 1)
+        cv2.setMouseCallback('Color Picker', show_values, param=frame)
+        cv2.imshow('Color Picker', frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
 # -------------------- ENTRY POINT --------------------
 if __name__ == "__main__":
     main()
+    # color_picker()
+
